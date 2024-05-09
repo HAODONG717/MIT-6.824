@@ -39,13 +39,14 @@ func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string, workerId string) {
 
 	// Your worker implementation here.
+	args := ExampleArgs{}
 	reply := &Job{}
 	alive := false
 	attempt := 0
 	for alive {
 		attempt++
 		fmt.Println(workerId, " >worker ask", attempt)
-
+		call("Coordinator.DistributeJob", &args, &reply)
 		fmt.Println(workerId, "worker get job", reply)
 		switch reply.JobType {
 		case MapJob:
