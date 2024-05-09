@@ -258,21 +258,65 @@ func (c *Coordinator) server() {
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
-	ret := false
-
-	// Your code here.
-
-	return ret
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	fmt.Println("+++++++++++++++++++++++++++++++++++++++++++")
+	return c.CoordinatorCondition == AllDone
 }
 
 // create a Coordinator.
 // main/mrcoordinator.go calls this function.
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
-	c := Coordinator{}
-	// Your code here.
+	c := Coordinator{
+		JobChannelMap:    make(chan *Job, len(files)),
+		JobChannelReduce: make(chan *Job, nReduce),
+		jobMetaHolder: JobMetaHolder{
+			MetaMap: make(map[int]*JobMetaInfo, len(files)+nReduce),
+		},
+		CoordinatorCondition: MapPhase,
+		ReducerNum:           nReduce,
+		MapNum:               len(files),
+		uniqueJobId:          0,
+	}
+
 	c.makeMapJobs(files)
 
 	c.server()
+
+	go c.CrashHandler()
+
 	return &c
+}
+
+func (c *Coordinator) CrashHandler() {
+	for {
+		time.Sleep(time.Second * 2)
+		c.mu.Lock()
+		if c.CoordinatorCondition == AllDone {
+			c.mu.Unlock()
+		}
+
+		timenow := time.Now()
+		for _, v := range c.jobMetaHolder.MetaMap {
+			fmt.Println(v)
+			if v.condition == JobWorking {
+				fmt.Println("job", v.JobPtr.JobId, " working for ", timenow.Sub(v.StartTime))
+			}
+			if v.condition == JobWorking && time.Now().Sub(v.StartTime) > 5*time.Second {
+				fmt.Println("detect a crash on job ", v.JobPtr.JobId)
+				switch v.JobPtr.JobType {
+				case MapJob:
+					c.JobChannelMap <- v.JobPtr
+					v.condition = JobWaiting
+				case ReduceJob:
+					c.JobChannelReduce <- v.JobPtr
+					v.condition = JobWorking
+
+				}
+			}
+		}
+		c.mu.Unlock()
+	}
+
 }
