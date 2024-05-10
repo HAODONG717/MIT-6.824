@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
-	"math/rand"
 	"strconv"
 	"strings"
 	"sync"
@@ -123,7 +122,7 @@ func (c *Coordinator) makeMapJobs(files []string) {
 			JobPtr:    job,
 		}
 		c.jobMetaHolder.putJob(jobMetaInfo)
-		fmt.Println("makeing map job : ", &job)
+		fmt.Println("put the job and job id = : ", job.JobId)
 		c.JobChannelMap <- job
 	}
 	fmt.Println("making map jobs has done")
@@ -154,10 +153,12 @@ func (c *Coordinator) makeReduceJobs() {
 }
 
 func (c *Coordinator) generateJobId() int {
-	return int(rand.Int63())
+	res := c.uniqueJobId
+	c.uniqueJobId++
+	return res
 }
 
-func (c *Coordinator) distributeJob(args *ExampleArgs, reply *Job) error {
+func (c *Coordinator) DistributeJob(args *ExampleArgs, reply *Job) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	fmt.Println("coodinator get a request from worker : ")
@@ -166,34 +167,34 @@ func (c *Coordinator) distributeJob(args *ExampleArgs, reply *Job) error {
 			*reply = *<-c.JobChannelMap
 			if !c.jobMetaHolder.sendJob(reply.JobId) {
 				fmt.Printf("[duplicated job id = %d] is runnnig", reply.JobId)
-			} else {
-				reply.JobType = JobWaiting
-				if c.jobMetaHolder.checkJobDone() {
-					c.nextPhase()
-				}
-				return nil
 			}
+		} else {
+			reply.JobType = WaitingJob
+			if c.jobMetaHolder.checkJobDone() {
+				c.nextPhase()
+			}
+			return nil
 		}
 	} else if c.CoordinatorCondition == ReducePhase {
 		if len(c.JobChannelReduce) > 0 {
 			*reply = *<-c.JobChannelReduce
 			if !c.jobMetaHolder.sendJob(reply.JobId) {
 				fmt.Printf("job %d is running\n", reply.JobId)
-			} else {
-				reply.JobType = JobWaiting
-				if c.jobMetaHolder.checkJobDone() {
-					c.nextPhase()
-				}
 			}
-			return nil
+		} else {
+			reply.JobType = WaitingJob
+			if c.jobMetaHolder.checkJobDone() {
+				c.nextPhase()
+			}
 		}
+		return nil
 	} else {
-		reply.JobId = KillJob
+		reply.JobType = KillJob
 	}
 	return nil
 }
 
-func (c *Coordinator) JobIsDone(job *Job, reply *ExampleArgs) error {
+func (c *Coordinator) JobIsDone(job *Job, reply *ExampleReply) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	switch job.JobType {
@@ -295,15 +296,15 @@ func (c *Coordinator) CrashHandler() {
 		c.mu.Lock()
 		if c.CoordinatorCondition == AllDone {
 			c.mu.Unlock()
+			return
 		}
 
 		timenow := time.Now()
 		for _, v := range c.jobMetaHolder.MetaMap {
-			fmt.Println(v)
 			if v.condition == JobWorking {
 				fmt.Println("job", v.JobPtr.JobId, " working for ", timenow.Sub(v.StartTime))
 			}
-			if v.condition == JobWorking && time.Now().Sub(v.StartTime) > 5*time.Second {
+			if v.condition == JobWorking && time.Now().Sub(v.StartTime) > 10*time.Second {
 				fmt.Println("detect a crash on job ", v.JobPtr.JobId)
 				switch v.JobPtr.JobType {
 				case MapJob:
@@ -311,8 +312,7 @@ func (c *Coordinator) CrashHandler() {
 					v.condition = JobWaiting
 				case ReduceJob:
 					c.JobChannelReduce <- v.JobPtr
-					v.condition = JobWorking
-
+					v.condition = JobWaiting
 				}
 			}
 		}

@@ -39,9 +39,9 @@ func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string, workerId string) {
 
 	// Your worker implementation here.
-	args := ExampleArgs{}
+	args := ExampleArgs{X: 1}
 	reply := &Job{}
-	alive := false
+	alive := true
 	attempt := 0
 	for alive {
 		attempt++
@@ -66,7 +66,6 @@ func Worker(mapf func(string, string) []KeyValue,
 			alive = false
 		}
 		time.Sleep(time.Second)
-
 	}
 
 	// uncomment to send the Example RPC to the coordinator.
@@ -76,7 +75,7 @@ func Worker(mapf func(string, string) []KeyValue,
 
 func JobIsDone(workerId string, job *Job) {
 	args := job
-	reply := &ExampleReply{}
+	reply := ExampleReply{}
 	call("Coordinator.JobIsDone", &args, &reply)
 }
 
@@ -95,28 +94,23 @@ func DoMap(mapf func(string, string) []KeyValue, reply *Job) {
 		kva := mapf(filename, string(content))
 		intermediate = append(intermediate, kva...)
 	}
-	sort.Sort(ByKey(intermediate))
-	for i, kva := range intermediate {
-		j := i + 1
-		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
-			j++
-		}
-		values := []string{}
-		for k := i; k < j; k++ {
-			values = append(values, intermediate[k].Value)
-		}
-		filename := GenerateFileName(reply.JobId, ihash(kva.Key)%reply.ReducerNum)
-		if file, err := os.Open(filename); err == nil {
-			enc := json.NewEncoder(file)
-			for _, kv := range values {
-				if err := enc.Encode(&kv); err != nil {
-					fmt.Printf("kv encode error, filename = %s and kv = %s", filename, kv)
-				}
-			}
-			file.Close()
-		}
-		i = j
+	//initialize and loop over []KeyValue
+	rn := reply.ReducerNum
+	HashedKV := make([][]KeyValue, rn)
+
+	for _, kv := range intermediate {
+		HashedKV[ihash(kv.Key)%rn] = append(HashedKV[ihash(kv.Key)%rn], kv)
 	}
+	for i := 0; i < rn; i++ {
+		oname := "mr-tmp-" + strconv.Itoa(reply.JobId) + "-" + strconv.Itoa(i)
+		ofile, _ := os.Create(oname)
+		enc := json.NewEncoder(ofile)
+		for _, kv := range HashedKV[i] {
+			enc.Encode(kv)
+		}
+		ofile.Close()
+	}
+
 }
 
 func DoReduce(reducef func(string, []string) string, response *Job) {
@@ -163,13 +157,6 @@ func readFromLocalFile(files []string) []KeyValue {
 		file.Close()
 	}
 	return kva
-}
-
-func GenerateFileName(jobId, reduceNum int) string {
-	jobIdStr := strconv.Itoa(jobId)
-	reduceNumStr := strconv.Itoa(reduceNum)
-	filename := "mr-tmp-" + jobIdStr + "-" + reduceNumStr
-	return filename
 }
 
 // example function to show how to make an RPC call to the coordinator.
