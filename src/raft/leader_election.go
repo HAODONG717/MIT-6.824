@@ -49,7 +49,7 @@ func (rf *Raft) startElection() {
 			}
 			DPrintf("\n%v: [%d] got enough votes, and now is the leader(currentTerm=%d, state=%v)!\n", rf.SayMeL(), rf.me, rf.currentTerm, rf.state)
 			rf.state = Leader
-			go rf.startAppendEntries(true)
+			go rf.StartAppendEntries(true)
 
 		}(i)
 	}

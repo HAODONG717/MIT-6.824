@@ -76,15 +76,24 @@ type Raft struct {
 	lastElection     time.Time      // 上一次选举时间
 	lastHeartbeat    time.Time      // 上一次心跳时间
 	peerTrackers     []PeerTrackers // 跟踪从节点的next index， match index， 上一次同步时间
+	log              *Log           // 日志记录
+
+	// Volatile state
+	commitIndex int // commitIndex是本机提交的
+	lastApplied int // lastApplied是该日志在所有的机器上都跑了一遍后才会更新？
+
+	applyHelper *ApplyHelper
+	applyCond   *sync.Cond
 }
 
 type RequestAppendEntriesArgs struct {
-	LeaderTerm   int        // Leader的Term
-	PrevLogIndex int        // 新日志条目的上一个日志的索引
-	PrevLogTerm  int        // 新日志的上一个日志的任期
-	Logs         []ApplyMsg //	需要被保存的日志条路，可能有多个
-	LeaderCommit int        // Leader已提交的最高日志项目的索引
+	LeaderTerm   int // Leader的Term
+	PrevLogIndex int // 新日志条目的上一个日志的索引
+	PrevLogTerm  int // 新日志的上一个日志的任期
+	//Logs         []ApplyMsg //	需要被保存的日志条目，可能有多个
+	LeaderCommit int // Leader已提交的最高日志项目的索引
 	LeaderId     int
+	Entries      []Entry
 }
 
 type RequestAppendEntriesReply struct {
@@ -218,8 +227,13 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
-func (rf *Raft) sendRequestAppendEntries(server int, args *RequestAppendEntriesArgs, reply *RequestAppendEntriesReply) bool {
-	ok := rf.peers[server].Call("Raft.RequestAppendEntries", args, reply)
+func (rf *Raft) sendRequestAppendEntries(isHeartBeat bool, server int, args *RequestAppendEntriesArgs, reply *RequestAppendEntriesReply) bool {
+	var ok bool
+	if isHeartBeat {
+		ok = rf.peers[server].Call("Raft.HandleHeartbeatRPC", args, reply)
+	} else {
+		ok = rf.peers[server].Call("Raft.HandleAppendEntriesRPC", args, reply)
+	}
 	return ok
 }
 
@@ -241,6 +255,19 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	term = rf.currentTerm
+	if rf.state != Leader {
+		isLeader = false
+		return index, term, isLeader
+	}
+
+	DPrintf("%v: a command index=%v cmd=%T %v come", rf.SayMeL(), index, command, command)
+	rf.log.appendL(Entry{term, command})
+	//rf.resetTrackedIndex()
+	DPrintf("%v: check the newly added log index：%d", rf.SayMeL(), rf.log.LastLogIndex)
+	go rf.StartAppendEntries(false)
 
 	return index, term, isLeader
 }
@@ -264,19 +291,16 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
-func (rf *Raft) startAppendEntries(heart bool) {
-	args := RequestAppendEntriesArgs{}
+func (rf *Raft) StartAppendEntries(heart bool) {
 	rf.mu.Lock()
-	defer rf.mu.Lock()
+	defer rf.mu.Unlock()
 	rf.resetElectionTimer()
-	args.LeaderTerm = rf.currentTerm
-	args.LeaderTerm = rf.me
 	// 并行向其他节点发送心跳，通知leader已经产生
 	for i, _ := range rf.peers {
 		if i == rf.me {
 			continue
 		}
-		go rf.AppendEntries(i, heart, &args)
+		go rf.AppendEntries(i, heart)
 	}
 }
 
@@ -309,16 +333,68 @@ func (rf *Raft) RequestAppendEntries(args *RequestAppendEntriesArgs, reply *Requ
 	rf.mu.Unlock()
 }
 
-func (rf *Raft) AppendEntries(targetServerId int, heart bool, args *RequestAppendEntriesArgs) {
-	reply := RequestAppendEntriesReply{}
-
-	rf.mu.Lock()
-	DPrintf("%v: is ready to send heartbeat to %d", rf.SayMeL(), targetServerId)
-	rf.mu.Unlock()
-
+func (rf *Raft) AppendEntries(targetServerId int, heart bool) {
 	if heart {
-		rf.sendRequestAppendEntries(targetServerId, args, &reply)
+		rf.mu.Lock()
+		if rf.state != Leader {
+			rf.mu.Unlock()
+			return
+		}
+		reply := RequestAppendEntriesReply{}
+		args := RequestAppendEntriesArgs{}
+		args.LeaderTerm = rf.currentTerm
+		args.LeaderId = rf.me
+		DPrintf("%v: %d is a leader, ready sending heartbeart to follower %d....", rf.SayMeL(), rf.me, targetServerId)
+		rf.mu.Unlock()
+
+		// 发送心跳包
+		ok := rf.sendRequestAppendEntries(true, targetServerId, &args, &reply)
+		if !ok {
+			return
+		}
+		if rf.state != Leader {
+			rf.mu.Unlock()
+			return
+		}
+		if reply.FollowerTerm < rf.currentTerm {
+			rf.mu.Unlock()
+			return
+		}
+		// 拒绝接收心跳，则可能是因为任期导致的
+		if reply.FollowerTerm > rf.currentTerm {
+			rf.votedFor = None
+			rf.state = Follower
+			rf.currentTerm = reply.FollowerTerm
+		}
+		rf.mu.Unlock()
+		return
+	} else {
+		rf.mu.Lock()
+		if rf.state != Leader {
+			rf.mu.Unlock()
+			return
+		}
+		args := RequestAppendEntriesArgs{}
+		args.PrevLogIndex = min(rf.log.LastLogIndex, rf.peerTrackers[targetServerId].nextIndex-1)
+		if args.PrevLogIndex+1 < rf.log.FirstLogIndex {
+			DPrintf("此时 %d 节点的nextIndex为%d,LastLogIndex为 %d, 最后一项日志为：\n", rf.me, rf.peerTrackers[rf.me].nextIndex,
+				rf.log.LastLogIndex)
+			return
+		}
+		args.LeaderTerm = rf.currentTerm
+		args.LeaderId = rf.me
+		args.LeaderCommit = rf.commitIndex
+		args.PrevLogTerm = rf.getEntryTerm(args.PrevLogIndex)
+		args.Entries = rf.log.getAppendEntries(args.PrevLogIndex + 1)
+		DPrintf("%v: the len of log entries: %d is ready to send to node %d!!! and the entries are %v\n",
+			rf.SayMeL(), len(args.Entries), targetServerId, args.Entries)
+		rf.mu.Unlock()
+
+		//fmt.Printf
+		reply := RequestAppendEntriesReply{}
+
 	}
+
 }
 
 func (rf *Raft) SayMeL() string {
@@ -350,11 +426,11 @@ func (rf *Raft) ticker() {
 			isHeartbeat := false
 			// 检测是需要发送单纯的心跳还是发送日志
 			// 心跳定时器过期则发送心跳，否则发送日志
-			if rf.pastElectionTimeout() {
+			if rf.pastHeartbeatTimeout() {
 				isHeartbeat = true
-				rf.resetElectionTimer()
+				rf.resetHeartbeatTimer()
 			}
-			rf.startAppendEntries(isHeartbeat)
+			rf.StartAppendEntries(isHeartbeat)
 		}
 		time.Sleep(tickInterval)
 	}

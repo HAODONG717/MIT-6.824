@@ -6,8 +6,8 @@ import "time"
 const activeWindowWidth = 2 * baseElectionTimeout * time.Millisecond
 
 type PeerTrackers struct {
-	nextIndex  uint64
-	matchIndex uint64
+	nextIndex  int
+	matchIndex int
 
 	lastAck time.Time
 }
