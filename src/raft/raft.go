@@ -262,6 +262,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		isLeader = false
 		return index, term, isLeader
 	}
+	index = rf.log.LastLogIndex + 1
+	// 开始发送AppendEntries rpc
 
 	DPrintf("%v: a command index=%v cmd=%T %v come", rf.SayMeL(), index, command, command)
 	rf.log.appendL(Entry{term, command})
@@ -294,6 +296,9 @@ func (rf *Raft) killed() bool {
 func (rf *Raft) StartAppendEntries(heart bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	if rf.state != Leader {
+		return
+	}
 	rf.resetElectionTimer()
 	// 并行向其他节点发送心跳，通知leader已经产生
 	for i, _ := range rf.peers {
@@ -323,6 +328,7 @@ func (rf *Raft) AppendEntries(targetServerId int, heart bool) {
 		if !ok {
 			return
 		}
+		rf.mu.Lock()
 		if rf.state != Leader {
 			rf.mu.Unlock()
 			return

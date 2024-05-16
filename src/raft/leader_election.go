@@ -48,8 +48,9 @@ func (rf *Raft) startElection() {
 				return
 			}
 			DPrintf("\n%v: [%d] got enough votes, and now is the leader(currentTerm=%d, state=%v)!\n", rf.SayMeL(), rf.me, rf.currentTerm, rf.state)
-			rf.state = Leader
-			go rf.StartAppendEntries(true)
+			//rf.state = Leader // 将自身设置为leader
+			rf.becomeLeader()
+			DPrintf("\n[%d] got enough votes, and now is the leader(currentTerm=%d, state=%v)!starting to append heartbeat...\n", rf.me, rf.currentTerm, rf.state)
 
 		}(i)
 	}
@@ -70,18 +71,18 @@ func (rf *Raft) resetElectionTimer() {
 }
 
 func (rf *Raft) becomeCandidate() {
+	//defer rf.persist()
 	rf.state = Candidate
 	rf.currentTerm++
+	//rf.votedMe = make([]bool, len(rf.peers))
 	rf.votedFor = rf.me
-	DPrintf("%v: 选举时间超时，将自身变为Candidate并且发起投票...", rf.SayMeL())
+	rf.resetElectionTimer()
 }
 
-func (rf *Raft) ToFollower() {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	rf.state = Follower
-	rf.votedFor = None
-	DPrintf("%v: I am converting to a follower.", rf.SayMeL())
+func (rf *Raft) becomeLeader() {
+	rf.state = Leader
+	DPrintf("%v :becomes leader and reset TrackedIndex\n", rf.SayMeL())
+	rf.resetTrackedIndex()
 }
 
 // 定义一个心跳兼日志同步处理器，这个方法是Candidate和Follower节点的处理
