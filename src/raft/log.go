@@ -13,6 +13,14 @@ type Log struct {
 	LastLogIndex  int
 }
 
+func NewLog() *Log {
+	return &Log{
+		Entries:       make([]Entry, 0),
+		FirstLogIndex: 1,
+		LastLogIndex:  0,
+	}
+}
+
 func (log *Log) getRealIndex(index int) int {
 	return index - log.FirstLogIndex
 }
@@ -51,5 +59,12 @@ func (rf *Raft) getEntryTerm(index int) int {
 	}
 
 	DPrintf("invalid index=%v in getEntryTerm rf.log.FirstLogIndex=%v rf.log.LastLogIndex=%v\n", index, rf.log.FirstLogIndex, rf.log.LastLogIndex)
+	return -1
+}
+
+func (rf *Raft) getLastEntryTerm() int {
+	if rf.log.LastLogIndex >= rf.log.FirstLogIndex {
+		return rf.log.getOneEntry(rf.log.LastLogIndex).Term
+	}
 	return -1
 }

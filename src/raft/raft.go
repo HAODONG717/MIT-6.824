@@ -304,35 +304,6 @@ func (rf *Raft) StartAppendEntries(heart bool) {
 	}
 }
 
-// 定义一个心跳兼日志同步处理器，这个方法是Candidate和Follower节点的处理
-func (rf *Raft) RequestAppendEntries(args *RequestAppendEntriesArgs, reply *RequestAppendEntriesReply) {
-	DPrintf("receiving heartbeat from leader %d and gonna get the lock...\n", args.LeaderId)
-	rf.mu.Lock()
-	reply.Success = true
-	DPrintf("%d receive heartbeat at leader %d's term %d, and my term is %d", rf.me, args.LeaderId, args.LeaderTerm, rf.currentTerm)
-	// 旧任期的leader抛弃
-	if args.LeaderTerm < rf.currentTerm {
-		reply.FollowerTerm = rf.currentTerm
-		reply.Success = false
-		rf.mu.Unlock()
-		return
-	}
-	rf.mu.Unlock()
-
-	rf.mu.Lock()
-	rf.resetElectionTimer()
-	rf.state = Follower
-
-	// 需要转变自己的身份为Follower
-	// 承认来者是个合法的新leader，则任期一定大于自己，此时需要设置votedFor为-1以及
-	if args.LeaderTerm > rf.currentTerm {
-		rf.votedFor = None
-		rf.currentTerm = args.LeaderTerm
-		reply.FollowerTerm = rf.currentTerm
-	}
-	rf.mu.Unlock()
-}
-
 func (rf *Raft) AppendEntries(targetServerId int, heart bool) {
 	if heart {
 		rf.mu.Lock()
@@ -377,7 +348,7 @@ func (rf *Raft) AppendEntries(targetServerId int, heart bool) {
 			rf.mu.Unlock()
 			return
 		}
-
+		// 要发送的日志是Leader中最新的log以及目标server更小的index
 		args.PrevLogIndex = min(rf.log.LastLogIndex, rf.peerTrackers[targetServerId].nextIndex-1)
 		if args.PrevLogIndex+1 < rf.log.FirstLogIndex {
 			DPrintf("此时 %d 节点的nextIndex为%d,LastLogIndex为 %d, 最后一项日志为：\n", rf.me, rf.peerTrackers[rf.me].nextIndex,
@@ -407,7 +378,8 @@ func (rf *Raft) AppendEntries(targetServerId int, heart bool) {
 		if reply.FollowerTerm < rf.currentTerm {
 			return
 		}
-		DPrintf("%v: get reply from %v reply.Term=%v reply.Success=%v reply.PrevLogTerm=%v reply.PrevLogIndex=%v myinfo:rf.log.FirstLogIndex=%v rf.log.LastLogIndex=%v\n")
+		DPrintf("%v: get reply from %v reply.Term=%v reply.Success=%v reply.PrevLogTerm=%v reply.PrevLogIndex=%v myinfo:rf.log.FirstLogIndex=%v rf.log.LastLogIndex=%v\n",
+			rf.SayMeL(), targetServerId, reply.FollowerTerm, reply.Success, reply.PrevLogTerm, reply.PrevLogIndex, rf.log.FirstLogIndex, rf.log.LastLogIndex)
 		if reply.FollowerTerm > rf.currentTerm {
 			rf.state = Follower
 			rf.currentTerm = reply.FollowerTerm
@@ -437,8 +409,6 @@ func (rf *Raft) AppendEntries(targetServerId int, heart bool) {
 			// 因为响应方面接收方做了优化，作为响应方的从节点可以直接跳到索引不匹配但是等于任期PrevLogTerm的第一个提交的日志记录
 			rf.peerTrackers[targetServerId].nextIndex = reply.PrevLogIndex + 1
 		} else {
-			// 此时rf.getEntryTerm(reply.PrevLogIndex) != reply.PrevLogTerm，也就是说此时索引相同位置上的日志提交时所处term都不同，
-			// 则此日志也必然是不同的，所以可以安排跳到前一个当前任期的第一个节点
 			// 此时rf.getEntryTerm(reply.PrevLogIndex) != reply.PrevLogTerm，也就是说此时索引相同位置上的日志提交时所处term都不同，
 			// 则此日志也必然是不同的，所以可以安排跳到前一个当前任期的第一个节点
 			PrevIndex := reply.PrevLogIndex
@@ -491,6 +461,35 @@ func (rf *Raft) ticker() {
 	DPrintf("tim")
 }
 
+// 通知tester接收这个日志消息，然后供测试使用
+func (rf *Raft) sendMsgToTest() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	for !rf.killed() {
+		DPrintf("%v: it is being blocked...", rf.SayMeL())
+		rf.applyCond.Wait()
+
+		for rf.lastApplied+1 <= rf.commitIndex {
+			i := rf.lastApplied + 1
+			rf.lastApplied++
+			if i < rf.log.FirstLogIndex {
+				DPrintf("%v: apply index=%v but rf.log.FirstLogIndex=%v rf.lastApplied=%v\n",
+					rf.SayMeL(), i, rf.log.FirstLogIndex, rf.lastApplied)
+				panic("error happening")
+			}
+			msg := ApplyMsg{
+				CommandValid: true,
+				Command:      rf.log.getOneEntry(i).Command,
+				CommandIndex: i,
+			}
+			DPrintf("%s: next apply index=%v lastApplied=%v len entries=%v "+
+				"LastLogIndex=%v cmd=%v\n", rf.SayMeL(), i, rf.lastApplied, len(rf.log.Entries),
+				rf.log.LastLogIndex, rf.log.getOneEntry(i).Command)
+			rf.applyHelper.tryApply(&msg)
+		}
+	}
+}
+
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
 // server's port is peers[me]. all the servers' peers[] arrays
@@ -511,13 +510,21 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.currentTerm = 0
 	rf.votedFor = None
 	rf.state = Follower
+	rf.resetElectionTimer()
 	rf.heartbeatTimeout = heartbeatTimeout
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	rf.log = NewLog()
+	rf.applyHelper = NewApplyHelper(applyCh, rf.lastApplied)
+	rf.commitIndex = 0
+	rf.lastApplied = 0
+	rf.peerTrackers = make([]PeerTrackers, len(rf.peers)) //对等节点追踪器
+	rf.applyCond = sync.NewCond(&rf.mu)
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
+	go rf.sendMsgToTest() // 供config协程追踪日志以测试
 
 	return rf
 }

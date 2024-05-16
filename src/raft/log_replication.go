@@ -14,6 +14,78 @@ func (rf *Raft) resetHeartbeatTimer() {
 	rf.lastHeartbeat = time.Now()
 }
 
+// nextIndex收敛速度优化：nextIndex跳跃算法
+// 定义一个心跳兼日志同步处理器，这个方法是Candidate和Follower节点的处理
+func (rf *Raft) HandleAppendEntriesRPC(args *RequestAppendEntriesArgs, reply *RequestAppendEntriesReply) {
+	rf.mu.Lock() // 加接收日志方的锁
+	defer rf.mu.Unlock()
+	reply.FollowerTerm = rf.currentTerm
+	reply.Success = true
+	// 旧任期的leader抛弃掉
+	if args.LeaderTerm < rf.currentTerm {
+		reply.Success = false
+		return
+	}
+	rf.resetElectionTimer()
+	rf.state = Follower // 需要转变自己的保持为Follower
+
+	if args.LeaderTerm > rf.currentTerm {
+		rf.votedFor = None // 调整votedFor为-1
+		rf.currentTerm = args.LeaderTerm
+		reply.FollowerTerm = rf.currentTerm
+	}
+
+	if args.PrevLogIndex+1 < rf.log.FirstLogIndex || args.PrevLogIndex > rf.log.LastLogIndex {
+		DPrintf("args.PrevLogIndex is %d, out of index...", args.PrevLogIndex)
+		reply.FollowerTerm = rf.currentTerm
+		reply.Success = false
+		reply.PrevLogIndex = rf.log.LastLogIndex
+		reply.PrevLogTerm = rf.getLastEntryTerm()
+	} else if rf.getEntryTerm(args.PrevLogIndex) == args.PrevLogTerm {
+		ok := true
+		for i, entry := range args.Entries {
+			index := args.PrevLogIndex + 1 + i
+			if index > rf.log.LastLogIndex {
+				rf.log.appendL(entry)
+			} else if rf.log.getOneEntry(index).Term != entry.Term {
+				// 采用覆盖写的方式
+				ok = false
+				*rf.log.getOneEntry(index) = entry
+			}
+		}
+		if !ok {
+			rf.log.LastLogIndex = args.PrevLogIndex + len(args.Entries)
+		}
+		if args.LeaderCommit > rf.commitIndex {
+			if args.LeaderCommit < rf.log.LastLogIndex {
+				rf.commitIndex = args.LeaderCommit
+			} else {
+				rf.commitIndex = rf.log.LastLogIndex
+			}
+			rf.applyCond.Broadcast()
+		}
+		reply.FollowerTerm = rf.currentTerm
+		reply.Success = true
+		reply.PrevLogIndex = rf.log.LastLogIndex
+		reply.PrevLogTerm = rf.getLastEntryTerm()
+		DPrintf("%v:log entries was overrited, added or done nothing, updating commitIndex to %d...", rf.SayMeL(), rf.commitIndex)
+	} else {
+		prevIndex := args.PrevLogIndex
+		for prevIndex >= rf.log.FirstLogIndex && rf.getEntryTerm(prevIndex) == rf.log.getOneEntry(args.PrevLogIndex).Term {
+			prevIndex--
+		}
+		//prevIndex++ 当前任期提交的第一个日志
+		reply.FollowerTerm = rf.currentTerm
+		reply.Success = false
+		if prevIndex >= rf.log.FirstLogIndex {
+			reply.PrevLogIndex = prevIndex
+			reply.PrevLogTerm = rf.getEntryTerm(prevIndex)
+			DPrintf("%v: stepping over the index of currentTerm to the last log entry of last term", rf.SayMeL())
+		}
+	}
+
+}
+
 func (rf *Raft) tryCommitL(matchIndex int) {
 	if matchIndex <= rf.commitIndex {
 		// 首先matchIndex应该是大于leader节点的commitIndex才能提交，因为commitIndex及其之前的不需要更新

@@ -84,6 +84,35 @@ func (rf *Raft) ToFollower() {
 	DPrintf("%v: I am converting to a follower.", rf.SayMeL())
 }
 
+// 定义一个心跳兼日志同步处理器，这个方法是Candidate和Follower节点的处理
+func (rf *Raft) HandleHeartbeatRPC(args *RequestAppendEntriesArgs, reply *RequestAppendEntriesReply) {
+	rf.mu.Lock() // 加接收心跳方的锁
+	defer rf.mu.Unlock()
+	reply.FollowerTerm = rf.currentTerm
+	reply.Success = true
+	// 旧任期的leader抛弃掉
+	if args.LeaderTerm < rf.currentTerm {
+		reply.Success = false
+		reply.FollowerTerm = rf.currentTerm
+		return
+	}
+	//DPrintf(200, "I am %d and the dead state is %d with term %d", rf.me)
+	DPrintf("%v: I am now receiving heartbeat from leader %d at term %d", rf.SayMeL(), args.LeaderId, args.LeaderTerm)
+	rf.resetElectionTimer()
+	// 需要转变自己的身份为Follower
+	rf.state = Follower
+	rf.votedFor = args.LeaderId
+
+	// 承认来者是个合法的新leader，则任期一定大于自己，此时需要设置votedFor为-1以及
+	if args.LeaderTerm > rf.currentTerm {
+		DPrintf("%v: leader %d's term at %d is greater than me", rf.SayMeL(), args.LeaderId, args.LeaderTerm)
+		rf.votedFor = None
+		rf.currentTerm = args.LeaderTerm
+		reply.FollowerTerm = rf.currentTerm
+	}
+	// 重置自身的选举定时器，这样自己就不会重新发出选举需求（因为它在ticker函数中被阻塞住了）
+}
+
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
