@@ -97,10 +97,10 @@ type RequestAppendEntriesArgs struct {
 }
 
 type RequestAppendEntriesReply struct {
-	FollowerTerm  int  // Follower的Term，
-	Success       bool // 是否推送成功
-	ConflictIndex int  // 冲突条目的下标
-	ConflictTerm  int  // 冲突条目的任期、
+	FollowerTerm int  // Follower的Term，
+	Success      bool // 是否推送成功
+	PrevLogIndex int
+	PrevLogTerm  int
 }
 
 func (rf *Raft) getHeartbeatTime() time.Duration {
@@ -369,12 +369,15 @@ func (rf *Raft) AppendEntries(targetServerId int, heart bool) {
 		rf.mu.Unlock()
 		return
 	} else {
+		args := RequestAppendEntriesArgs{}
+		reply := RequestAppendEntriesReply{}
+
 		rf.mu.Lock()
 		if rf.state != Leader {
 			rf.mu.Unlock()
 			return
 		}
-		args := RequestAppendEntriesArgs{}
+
 		args.PrevLogIndex = min(rf.log.LastLogIndex, rf.peerTrackers[targetServerId].nextIndex-1)
 		if args.PrevLogIndex+1 < rf.log.FirstLogIndex {
 			DPrintf("此时 %d 节点的nextIndex为%d,LastLogIndex为 %d, 最后一项日志为：\n", rf.me, rf.peerTrackers[rf.me].nextIndex,
@@ -390,9 +393,60 @@ func (rf *Raft) AppendEntries(targetServerId int, heart bool) {
 			rf.SayMeL(), len(args.Entries), targetServerId, args.Entries)
 		rf.mu.Unlock()
 
-		//fmt.Printf
-		reply := RequestAppendEntriesReply{}
+		ok := rf.sendRequestAppendEntries(false, targetServerId, &args, &reply)
 
+		if !ok {
+			return
+		}
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
+		if rf.state != Leader {
+			return
+		}
+		// 丢掉旧rpc响应
+		if reply.FollowerTerm < rf.currentTerm {
+			return
+		}
+		DPrintf("%v: get reply from %v reply.Term=%v reply.Success=%v reply.PrevLogTerm=%v reply.PrevLogIndex=%v myinfo:rf.log.FirstLogIndex=%v rf.log.LastLogIndex=%v\n")
+		if reply.FollowerTerm > rf.currentTerm {
+			rf.state = Follower
+			rf.currentTerm = reply.FollowerTerm
+			rf.votedFor = None
+			return
+		}
+		DPrintf("%v: get append reply reply.PrevLogIndex=%v reply.PrevLogTerm=%v reply.Success=%v heart=%v\n", rf.SayMeL(), reply.PrevLogIndex, reply.PrevLogTerm, reply.Success, heart)
+
+		if reply.Success {
+			rf.peerTrackers[targetServerId].nextIndex = args.PrevLogIndex + len(args.Entries) + 1
+			rf.peerTrackers[targetServerId].matchIndex = args.PrevLogIndex + len(args.Entries)
+			DPrintf("success! now trying to commit the log...\n")
+			rf.tryCommitL(rf.peerTrackers[targetServerId].matchIndex)
+			return
+		}
+		//reply.Success is false
+		if rf.log.empty() { //判掉为空的情况 方便后面讨论
+			//go rf.InstallSnapshot(serverId)
+			return
+		}
+		if reply.PrevLogIndex+1 < rf.log.FirstLogIndex {
+			return
+		}
+		if reply.PrevLogIndex > rf.log.LastLogIndex {
+			rf.peerTrackers[targetServerId].nextIndex = rf.log.LastLogIndex + 1
+		} else if rf.getEntryTerm(reply.PrevLogIndex) == reply.PrevLogTerm {
+			// 因为响应方面接收方做了优化，作为响应方的从节点可以直接跳到索引不匹配但是等于任期PrevLogTerm的第一个提交的日志记录
+			rf.peerTrackers[targetServerId].nextIndex = reply.PrevLogIndex + 1
+		} else {
+			// 此时rf.getEntryTerm(reply.PrevLogIndex) != reply.PrevLogTerm，也就是说此时索引相同位置上的日志提交时所处term都不同，
+			// 则此日志也必然是不同的，所以可以安排跳到前一个当前任期的第一个节点
+			// 此时rf.getEntryTerm(reply.PrevLogIndex) != reply.PrevLogTerm，也就是说此时索引相同位置上的日志提交时所处term都不同，
+			// 则此日志也必然是不同的，所以可以安排跳到前一个当前任期的第一个节点
+			PrevIndex := reply.PrevLogIndex
+			for PrevIndex >= rf.log.FirstLogIndex && rf.getEntryTerm(PrevIndex) == rf.getEntryTerm(reply.PrevLogIndex) {
+				PrevIndex--
+			}
+			rf.peerTrackers[targetServerId].nextIndex = PrevIndex + 1
+		}
 	}
 
 }
