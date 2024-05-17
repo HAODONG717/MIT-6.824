@@ -86,6 +86,10 @@ type Raft struct {
 
 	applyHelper *ApplyHelper
 	applyCond   *sync.Cond
+
+	snapshot                 []byte
+	snapshotLastIncludeIndex int
+	snapshotLastIncludeTerm  int
 }
 
 type RequestAppendEntriesArgs struct {
@@ -175,15 +179,6 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 	return true
 }
 
-// the service says it has created a snapshot that has
-// all info up to and including index. this means the
-// service no longer needs the log through (and including)
-// that index. Raft should now trim its log as much as possible.
-func (rf *Raft) Snapshot(index int, snapshot []byte) {
-	// Your code here (2D).
-
-}
-
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 type RequestVoteArgs struct {
@@ -201,6 +196,18 @@ type RequestVoteReply struct {
 	// Your data here (2A).
 	Term        int
 	VoteGranted bool
+}
+
+// RequestInstallSnapShot RPC reply structure
+type RequestInstallSnapShotArgs struct {
+	Term             int
+	LeaderId         int
+	LastIncludeIndex int
+	LastIncludeTerm  int
+	Snapshot         []byte
+}
+type RequestInstallSnapShotReply struct {
+	Term int
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -242,6 +249,11 @@ func (rf *Raft) sendRequestAppendEntries(isHeartBeat bool, server int, args *Req
 	} else {
 		ok = rf.peers[server].Call("Raft.HandleAppendEntriesRPC", args, reply)
 	}
+	return ok
+}
+
+func (rf *Raft) sendRequestInstallSnapshot(server int, args *RequestInstallSnapShotArgs, reply *RequestInstallSnapShotReply) bool {
+	ok := rf.peers[server].Call("Raft.RequestInstallSnapshot", args, reply)
 	return ok
 }
 
