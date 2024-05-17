@@ -18,9 +18,13 @@ func (rf *Raft) startElection() {
 	done := false
 	votes := 1
 	term := rf.currentTerm
-	DPrintf("[%d] attempting an election at term %d...", rf.me, rf.currentTerm)
 	args := RequestVoteArgs{Term: rf.currentTerm, CandidateId: rf.me}
-
+	args.Term = rf.currentTerm
+	args.CandidateId = rf.me
+	args.LastLogIndex = rf.log.LastLogIndex
+	args.LastLogTerm = rf.getLastEntryTerm()
+	DPrintf("[%d] attempting an election at term %d with my LastLogIndex %d and LastLogTerm %d", rf.me, rf.currentTerm, rf.log.LastLogIndex, args.LastLogTerm)
+	defer rf.persist()
 	for i, _ := range rf.peers {
 		if rf.me == i {
 			continue
@@ -123,6 +127,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		DPrintf("%v: candidate的任期是%d, 小于我，所以拒绝", rf.SayMeL(), args.Term)
 		reply.VoteGranted = false
 		reply.Term = rf.currentTerm
+		rf.persist()
 		return
 	}
 	DPrintf("%v:candidate为%d,任期是%d", rf.SayMeL(), args.CandidateId, args.Term)
@@ -133,8 +138,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		DPrintf("%v:candidate %d的任期比自己大，所以修改rf.votedFor从%d到-1", rf.SayMeL(), args.CandidateId, rf.votedFor)
 	}
 	reply.Term = rf.currentTerm
-	// Lab2B的日志复制直接确定为true
-	update := true
+	// candidate节点发送过来的日志索引以及任期必须大于等于自己的日志索引及任期
+	update := false
+	update = update || args.LastLogTerm > rf.getLastEntryTerm()
+	update = update || args.LastLogTerm == rf.getLastEntryTerm() && args.LastLogIndex >= rf.log.LastLogIndex
+
 	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && update {
 		//竞选任期大于自身任期，则更新自身任期，并转为follower
 		rf.votedFor = args.CandidateId
@@ -142,7 +150,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.resetElectionTimer()
 		reply.VoteGranted = true
 		DPrintf("%v: 同意把票投给%d, 它的任期是%d", rf.SayMeL(), args.CandidateId, args.Term)
+		rf.persist()
 	} else {
 		reply.VoteGranted = false
+		DPrintf("%v: 投出反对票给节点%d， 原因：我已经投票给%d", rf.SayMeL(), args.CandidateId, rf.votedFor)
+
 	}
 }

@@ -18,6 +18,8 @@ package raft
 //
 
 import (
+	"6.824/labgob"
+	"bytes"
 	"math/rand"
 	//	"bytes"
 	"sync"
@@ -132,33 +134,36 @@ func (rf *Raft) GetState() (int, bool) {
 // see paper's Figure 2 for a description of what should be persistent.
 func (rf *Raft) persist() {
 	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm) // 持久化任期
+	e.Encode(rf.votedFor)    // 持久化votedFor
+	e.Encode(rf.log)         // 持久化日志
+	data := w.Bytes()
+	go rf.persister.SaveRaftState(data)
 }
 
 // restore previously persisted state.
-func (rf *Raft) readPersist(data []byte) {
-	if data == nil || len(data) < 1 { // bootstrap without any state?
+func (rf *Raft) readPersist() {
+	stateData := rf.persister.ReadRaftState()
+	if stateData == nil || len(stateData) < 1 { // bootstrap without any state?
 		return
 	}
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	if stateData != nil && len(stateData) > 0 { // bootstrap without any state?
+		r := bytes.NewBuffer(stateData)
+		d := labgob.NewDecoder(r)
+		rf.votedFor = 0 // in case labgob waring
+		if d.Decode(&rf.currentTerm) != nil ||
+			d.Decode(&rf.votedFor) != nil ||
+			d.Decode(&rf.log) != nil {
+			//   error...
+			DPrintf("%v: readPersist decode error\n", rf.SayMeL())
+			panic("")
+		}
+	}
 }
 
 // A service wants to switch to snapshot.  Only do so if Raft hasn't
@@ -185,6 +190,9 @@ type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
 	Term        int
 	CandidateId int
+
+	LastLogIndex int // index of candidate’s last log entry (§5.4)
+	LastLogTerm  int //term of candidate’s last log entry
 }
 
 // example RequestVote RPC reply structure.
@@ -267,6 +275,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	DPrintf("%v: a command index=%v cmd=%T %v come", rf.SayMeL(), index, command, command)
 	rf.log.appendL(Entry{term, command})
+	rf.persist()
 	//rf.resetTrackedIndex()
 	DPrintf("%v: check the newly added log index：%d", rf.SayMeL(), rf.log.LastLogIndex)
 	go rf.StartAppendEntries(false)
@@ -390,6 +399,7 @@ func (rf *Raft) AppendEntries(targetServerId int, heart bool) {
 			rf.state = Follower
 			rf.currentTerm = reply.FollowerTerm
 			rf.votedFor = None
+			rf.persist()
 			return
 		}
 		DPrintf("%v: get append reply reply.PrevLogIndex=%v reply.PrevLogTerm=%v reply.Success=%v heart=%v\n", rf.SayMeL(), reply.PrevLogIndex, reply.PrevLogTerm, reply.Success, heart)
@@ -459,6 +469,7 @@ func (rf *Raft) ticker() {
 			if rf.pastHeartbeatTimeout() {
 				isHeartbeat = true
 				rf.resetHeartbeatTimer()
+				rf.StartAppendEntries(isHeartbeat)
 			}
 			rf.StartAppendEntries(isHeartbeat)
 		}
@@ -518,10 +529,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state = Follower
 	rf.resetElectionTimer()
 	rf.heartbeatTimeout = heartbeatTimeout
-
-	// initialize from state persisted before a crash
-	rf.readPersist(persister.ReadRaftState())
 	rf.log = NewLog()
+	// initialize from state persisted before a crash
+	rf.readPersist()
 	rf.applyHelper = NewApplyHelper(applyCh, rf.lastApplied)
 	rf.commitIndex = 0
 	rf.lastApplied = 0
