@@ -51,9 +51,9 @@ func (rf *Raft) getEntryTerm(index int) int {
 	if index == 0 {
 		return 0
 	}
-	//if index == rf.log.FirstLogIndex-1 {
-	//	return rf.snapshotLastIncludeTerm
-	//}
+	if index == rf.log.FirstLogIndex-1 {
+		return rf.snapshotLastIncludeTerm
+	}
 	if rf.log.FirstLogIndex <= rf.log.LastLogIndex {
 		return rf.log.getOneEntry(index).Term
 	}
@@ -65,6 +65,8 @@ func (rf *Raft) getEntryTerm(index int) int {
 func (rf *Raft) getLastEntryTerm() int {
 	if rf.log.LastLogIndex >= rf.log.FirstLogIndex {
 		return rf.log.getOneEntry(rf.log.LastLogIndex).Term
+	} else {
+		return rf.snapshotLastIncludeTerm
 	}
 	return -1
 }

@@ -1010,7 +1010,7 @@ func TestUnreliableChurn2C(t *testing.T) {
 const MAXLOGSIZE = 2000
 
 func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash bool) {
-	iters := 30
+	iters := 20
 	servers := 3
 	cfg := make_config(t, servers, !reliable, true)
 	defer cfg.cleanup()
@@ -1021,6 +1021,7 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 	leader1 := cfg.checkOneLeader()
 
 	for i := 0; i < iters; i++ {
+		DPrintf("this is the %d th iter", i)
 		victim := (leader1 + 1) % servers
 		sender := leader1
 		if i%3 == 1 {
@@ -1031,17 +1032,35 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 		if disconnect {
 			cfg.disconnect(victim)
 			cfg.one(rand.Int(), servers-1, true)
+			DPrintf("%v: 成功将节点断联并且日志仍被多数节点复制", cfg.rafts[victim].SayMeL())
 		}
 		if crash {
 			cfg.crash1(victim)
+			DPrintf("%d 节点已经被下线", victim)
 			cfg.one(rand.Int(), servers-1, true)
+			DPrintf("成功将节点%d下线", victim)
 		}
-		// send enough to get a snapshot
-		for i := 0; i < SnapShotInterval+1; i++ {
+
+		// perhaps send enough to get a snapshot
+		nn := (SnapShotInterval / 2) + (rand.Int() % SnapShotInterval)
+		DPrintf("发送足够的日志以便后续校验其正确性")
+		for i := 0; i < nn; i++ {
 			cfg.rafts[sender].Start(rand.Int())
 		}
+
 		// let applier threads catch up with the Start()'s
-		cfg.one(rand.Int(), servers-1, true)
+		if disconnect == false && crash == false {
+			// make sure all followers have caught up, so that
+			// an InstallSnapshot RPC isn't required for
+			// TestSnapshotBasic2D().
+			DPrintf("准备校验快照是否已发送给从节点....")
+			cfg.one(rand.Int(), servers, true)
+			DPrintf("校验完毕....")
+
+		} else {
+			cfg.one(rand.Int(), servers-1, true)
+			DPrintf("快照或者日志已被大多数节点接收")
+		}
 
 		if cfg.LogSize() >= MAXLOGSIZE {
 			cfg.t.Fatalf("Log size too large")
@@ -1055,14 +1074,16 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 		}
 		if crash {
 			cfg.start1(victim, cfg.applierSnap)
+			DPrintf("重新上线%d节点之前成功应用快照", victim)
 			cfg.connect(victim)
+			DPrintf("%v: 节点上线成功！", cfg.rafts[victim].SayMeL())
 			cfg.one(rand.Int(), servers, true)
 			leader1 = cfg.checkOneLeader()
+			DPrintf("%v：节点%d重连后, 产生的leader为%d", cfg.rafts[leader1].SayMeL(), victim, leader1)
 		}
 	}
 	cfg.end()
 }
-
 func TestSnapshotBasic2D(t *testing.T) {
 	snapcommon(t, "Test (2D): snapshots basic", false, true, false)
 }

@@ -143,18 +143,26 @@ func (rf *Raft) persist() {
 	e.Encode(rf.currentTerm) // 持久化任期
 	e.Encode(rf.votedFor)    // 持久化votedFor
 	e.Encode(rf.log)         // 持久化日志
+	e.Encode(rf.snapshotLastIncludeIndex)
+	e.Encode(rf.snapshotLastIncludeTerm)
 	data := w.Bytes()
-	go rf.persister.SaveRaftState(data)
+
+	if rf.snapshotLastIncludeIndex > 0 {
+		rf.persister.SaveStateAndSnapshot(data, rf.snapshot)
+	} else {
+		rf.persister.SaveRaftState(data)
+	}
 }
 
 // restore previously persisted state.
 func (rf *Raft) readPersist() {
+
 	stateData := rf.persister.ReadRaftState()
 	if stateData == nil || len(stateData) < 1 { // bootstrap without any state?
 		return
 	}
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	//rf.mu.Lock()
+	//defer rf.mu.Unlock()
 	// Your code here (2C).
 	if stateData != nil && len(stateData) > 0 { // bootstrap without any state?
 		r := bytes.NewBuffer(stateData)
@@ -162,12 +170,19 @@ func (rf *Raft) readPersist() {
 		rf.votedFor = 0 // in case labgob waring
 		if d.Decode(&rf.currentTerm) != nil ||
 			d.Decode(&rf.votedFor) != nil ||
-			d.Decode(&rf.log) != nil {
+			d.Decode(&rf.log) != nil ||
+			d.Decode(&rf.snapshotLastIncludeIndex) != nil ||
+			d.Decode(&rf.snapshotLastIncludeTerm) != nil {
 			//   error...
 			DPrintf("%v: readPersist decode error\n", rf.SayMeL())
 			panic("")
 		}
 	}
+	rf.snapshot = rf.persister.ReadSnapshot()
+	rf.commitIndex = rf.snapshotLastIncludeIndex
+	rf.lastApplied = rf.snapshotLastIncludeIndex
+	DPrintf("%v: 节点被宕机重启，成功加载获取持久化数据", rf.SayMeL())
+
 }
 
 // A service wants to switch to snapshot.  Only do so if Raft hasn't
@@ -378,8 +393,9 @@ func (rf *Raft) AppendEntries(targetServerId int, heart bool) {
 		// 要发送的日志是Leader中最新的log以及目标server更小的index
 		args.PrevLogIndex = min(rf.log.LastLogIndex, rf.peerTrackers[targetServerId].nextIndex-1)
 		if args.PrevLogIndex+1 < rf.log.FirstLogIndex {
-			DPrintf("此时 %d 节点的nextIndex为%d,LastLogIndex为 %d, 最后一项日志为：\n", rf.me, rf.peerTrackers[rf.me].nextIndex,
-				rf.log.LastLogIndex)
+			DPrintf("%v: 节点%d日志匹配索引为%d更新速度太慢，准备发送快照", rf.SayMeL(), targetServerId, args.PrevLogIndex)
+			go rf.InstallSnapshot(targetServerId)
+			rf.mu.Unlock()
 			return
 		}
 		args.LeaderTerm = rf.currentTerm
@@ -425,10 +441,13 @@ func (rf *Raft) AppendEntries(targetServerId int, heart bool) {
 		}
 		//reply.Success is false
 		if rf.log.empty() { //判掉为空的情况 方便后面讨论
-			//go rf.InstallSnapshot(serverId)
+			DPrintf("%v: 日志被快照清空，发送给%d快照", rf.SayMeL(), targetServerId)
+			go rf.InstallSnapshot(targetServerId)
 			return
 		}
 		if reply.PrevLogIndex+1 < rf.log.FirstLogIndex {
+			DPrintf("%v: 节点%d的日志落后太多，发送快照！", rf.SayMeL(), targetServerId)
+			go rf.InstallSnapshot(targetServerId)
 			return
 		}
 		if reply.PrevLogIndex > rf.log.LastLogIndex {
@@ -442,6 +461,13 @@ func (rf *Raft) AppendEntries(targetServerId int, heart bool) {
 			PrevIndex := reply.PrevLogIndex
 			for PrevIndex >= rf.log.FirstLogIndex && rf.getEntryTerm(PrevIndex) == rf.getEntryTerm(reply.PrevLogIndex) {
 				PrevIndex--
+			}
+			if PrevIndex+1 < rf.log.FirstLogIndex {
+				if rf.log.FirstLogIndex > 1 {
+					DPrintf("%v:探测到节点%d的日志落后太多，发送快照！", rf.SayMeL(), targetServerId)
+					go rf.InstallSnapshot(targetServerId)
+					return
+				}
 			}
 			rf.peerTrackers[targetServerId].nextIndex = PrevIndex + 1
 		}
@@ -502,6 +528,7 @@ func (rf *Raft) sendMsgToTest() {
 			i := rf.lastApplied + 1
 			rf.lastApplied++
 			if i < rf.log.FirstLogIndex {
+				DPrintf("BUG：The rf.commitIndex is %d, term is %d, lastLogIndex is %d, and the log is %v", rf.commitIndex, rf.currentTerm, rf.log.LastLogIndex, rf.log.Entries)
 				DPrintf("%v: apply index=%v but rf.log.FirstLogIndex=%v rf.lastApplied=%v\n",
 					rf.SayMeL(), i, rf.log.FirstLogIndex, rf.lastApplied)
 				panic("error happening")
@@ -542,11 +569,18 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.resetElectionTimer()
 	rf.heartbeatTimeout = heartbeatTimeout
 	rf.log = NewLog()
+
+	// 初始化快照
+	rf.snapshot = nil
+	rf.snapshotLastIncludeIndex = 0
+	rf.snapshotLastIncludeTerm = 0
+	// 初始化状态机相关参数
+	rf.commitIndex = 0
+	rf.lastApplied = 0
+
 	// initialize from state persisted before a crash
 	rf.readPersist()
 	rf.applyHelper = NewApplyHelper(applyCh, rf.lastApplied)
-	rf.commitIndex = 0
-	rf.lastApplied = 0
 	rf.peerTrackers = make([]PeerTrackers, len(rf.peers)) //对等节点追踪器
 	rf.applyCond = sync.NewCond(&rf.mu)
 
