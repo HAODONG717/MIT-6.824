@@ -34,6 +34,11 @@ type KVServer struct {
 	seqMap    map[int64]int     //为了确保seq只执行一次	clientId / seqId
 	waitChMap map[int]chan Op   //传递由下层Raft服务的appCh传过来的command	index / chan(Op)
 	kvPersist map[string]string // 存储持久化的KV键值对	K / V
+
+	lastApplied int // 最近一次应用的日志命令所在的索引
+
+	lastIncludeIndex int             // 最近一次快照的截止的日志索引
+	persister        *raft.Persister // 共享raft的持久化地址，方便查找
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
@@ -173,6 +178,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// You may need initialization code here.
 
+	kv.persister = persister
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
@@ -181,6 +187,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.kvPersist = make(map[string]string)
 	kv.waitChMap = make(map[int]chan Op)
 
+	kv.decodeSnapshot(kv.rf.GetLastIncludeIndex(), kv.persister.ReadSnapshot())
 	go kv.applyMsgHandlerLoop()
 	return kv
 }
@@ -192,26 +199,39 @@ func (kv *KVServer) applyMsgHandlerLoop() {
 		}
 		select {
 		case msg := <-kv.applyCh:
-			index := msg.CommandIndex
-			op := msg.Command.(Op)
-			if !kv.ifDuplicate(op.ClientId, op.SeqId) {
-				kv.mu.Lock()
-				switch op.OpType {
-				case PutOp:
-					kv.kvPersist[op.Key] = op.Value
-					DPrintf("put后，结果为%v", kv.kvPersist[op.Key])
+			// 如果是命令消息，则应用命令同时响应客户端
+			if msg.CommandValid {
+				index := msg.CommandIndex
+				// 传来的信息快照已经存储了则直接返回
+				op := msg.Command.(Op)
 
-				case AppendOp:
-					kv.kvPersist[op.Key] += op.Value
-					DPrintf("Append后，结果为%v", kv.kvPersist[op.Key])
+				//fmt.Printf("[ ~~~~applyMsgHandlerLoop~~~~ ]: %+v\n", msg)
+				if !kv.ifDuplicate(op.ClientId, op.SeqId) {
+					kv.mu.Lock()
+					switch op.OpType {
+					case PutOp:
+						kv.kvPersist[op.Key] = op.Value
+						//DPrintf("put后，结果为%v", kv.kvPersist[op.Key])
 
+					case AppendOp:
+						kv.kvPersist[op.Key] += op.Value
+						//DPrintf("Append后，结果为%v", kv.kvPersist[op.Key])
+
+					}
+					kv.seqMap[op.ClientId] = op.SeqId
+					// 如果需要日志的容量达到规定值则需要制作快照并且投递
+					if kv.isNeedSnapshot() {
+						go kv.makeSnapshot(msg.CommandIndex)
+					}
+					kv.mu.Unlock()
 				}
-				kv.seqMap[op.ClientId] = op.SeqId
-				kv.mu.Unlock()
+				// 将返回的ch返回waitCh
+				kv.getWaitCh(index) <- op
+			} else if msg.SnapshotValid {
+				// 如果是raft传递上来的快照消息，就应用快照，但是不需要响应客户
+				//DPrintf( "节点%d应用快照", kv.me)
+				kv.decodeSnapshot(msg.SnapshotIndex, msg.Snapshot)
 			}
-
-			// 将返回的ch返回waitCh
-			kv.getWaitCh(index) <- op
 		}
 	}
 

@@ -590,3 +590,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	return rf
 }
+
+//func (rf *Raft) GetLastIncludeIndex() int {
+//	rf.mu.Lock()
+//	defer rf.mu.Unlock()
+//	return rf.snapshotLastIncludeIndex
+//}

@@ -70,3 +70,9 @@ func (rf *Raft) getLastEntryTerm() int {
 	}
 	return -1
 }
+
+func (rf *Raft) GetLastIncludeIndex() int {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.snapshotLastIncludeIndex
+}
