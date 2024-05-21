@@ -4,27 +4,37 @@ import "sort"
 
 // 浅拷贝
 func (sc *ShardCtrler) execQueryCmd(op *Op) {
-
 	// 是-1就返回最近的配置
-	if op.Num == -1 || op.Num >= len(sc.configs) {
+	if op.Num == -1 {
 		op.Cfg = sc.configs[len(sc.configs)-1]
-		DPrintf(1111, "[节点%d执行query之后最新配置信息]: len(sc.configs)：%v, sc.configs[len(sc.configs)-1].Num： %v, sc.configs[len(sc.configs)-1].Shards： %v, sc.configs[len(sc.configs)-1].Groups： %v",
+		DPrintf("[节点%d执行query之后最新配置信息]: len(sc.configs)：%v, sc.configs[len(sc.configs)-1].Num： %v, sc.configs[len(sc.configs)-1].Shards： %v, sc.configs[len(sc.configs)-1].Groups： %v",
 			sc.me, len(sc.configs), sc.configs[len(sc.configs)-1].Num, sc.configs[len(sc.configs)-1].Shards, sc.configs[len(sc.configs)-1].Groups)
 		return
 	}
 	op.Cfg = sc.configs[op.Num]
-	DPrintf(1111, "[节点%d执行query获取版本号为%d的配置信息]: len(sc.configs)：%v, sc.configs[len(sc.configs)-1].Num： %v, sc.configs[len(sc.configs)-1].Shards： %v, sc.configs[len(sc.configs)-1].Groups： %v",
+	DPrintf("[节点%d执行query获取版本号为%d的配置信息]: len(sc.configs)：%v, sc.configs[len(sc.configs)-1].Num： %v, sc.configs[len(sc.configs)-1].Shards： %v, sc.configs[len(sc.configs)-1].Groups： %v",
 		sc.me, op.Num, len(sc.configs), sc.configs[len(sc.configs)-1].Num, sc.configs[len(sc.configs)-1].Shards, sc.configs[len(sc.configs)-1].Groups)
 
+}
+
+// 状态机执行leave命令的时候
+func (sc *ShardCtrler) execLeaveCmd(op *Op) {
+	sc.RebalanceShardsForLeave(op.GIDs)
+}
+
+// 状态机执行join命令的时候
+func (sc *ShardCtrler) execJoinCmd(op *Op) {
+	sc.RebalanceShardsForJoin(op.Servers)
 }
 
 func (sc *ShardCtrler) execMoveCmd(op *Op) {
 	sc.MoveShard(op.Shard, op.GID)
 }
+
 func (sc *ShardCtrler) MoveShard(shardId int, GID int) {
-	DPrintf(1111, "[Move前的配置信息]: len(sc.configs)：%v, sc.configs[len(sc.configs)-1].Num： %v, sc.configs[len(sc.configs)-1].Shards： %v, sc.configs[len(sc.configs)-1].Groups： %v",
+	DPrintf("[Move前的配置信息]: len(sc.configs)：%v, sc.configs[len(sc.configs)-1].Num： %v, sc.configs[len(sc.configs)-1].Shards： %v, sc.configs[len(sc.configs)-1].Groups： %v",
 		len(sc.configs), sc.configs[len(sc.configs)-1].Num, sc.configs[len(sc.configs)-1].Shards, sc.configs[len(sc.configs)-1].Groups)
-	DPrintf(111, "move args: %d and %d", shardId, GID)
+	DPrintf("move args: %d and %d", shardId, GID)
 	// 获取最新的配置
 	oldConfig := sc.configs[len(sc.configs)-1]
 	newConfig := Config{
@@ -52,16 +62,9 @@ func (sc *ShardCtrler) MoveShard(shardId int, GID int) {
 	sc.configs = append(sc.configs, newConfig)
 
 	// 可以在这里输出新配置的信息，或者执行其他后续操作
-	DPrintf(1111, "[Move后最新配置信息]: len(sc.configs)：%v, sc.configs[len(sc.configs)-1].Num： %v, sc.configs[len(sc.configs)-1].Shards： %v, sc.configs[len(sc.configs)-1].Groups： %v",
+	DPrintf("[Move后最新配置信息]: len(sc.configs)：%v, sc.configs[len(sc.configs)-1].Num： %v, sc.configs[len(sc.configs)-1].Shards： %v, sc.configs[len(sc.configs)-1].Groups： %v",
 		len(sc.configs), sc.configs[len(sc.configs)-1].Num, sc.configs[len(sc.configs)-1].Shards, sc.configs[len(sc.configs)-1].Groups)
-}
 
-// 状态机执行join命令的时候
-func (sc *ShardCtrler) execJoinCmd(op *Op) {
-	//sc.mu.Lock()
-	//defer sc.mu.Unlock()
-	sc.RebalanceShardsForJoin(op.Servers)
-	//sc.configs[newConfigIndex] = newConfig
 }
 
 func (sc *ShardCtrler) RebalanceShardsForJoin(newGroups map[int][]string) {
@@ -72,7 +75,7 @@ func (sc *ShardCtrler) RebalanceShardsForJoin(newGroups map[int][]string) {
 		Shards: oldConfig.Shards,
 		Groups: make(map[int][]string),
 	}
-	DPrintf(111, "join之前，检查到旧的复制组为:%v", oldConfig.Groups)
+	DPrintf("join之前，检查到旧的复制组为:%v", oldConfig.Groups)
 
 	// 合并旧的和新的复制组
 	for gid, servers := range oldConfig.Groups {
@@ -128,14 +131,8 @@ func (sc *ShardCtrler) RebalanceShardsForJoin(newGroups map[int][]string) {
 	}
 	sc.configs = append(sc.configs, newConfig)
 
-	DPrintf(1111, "[节点%d执行Join之后最新配置信息]: len(sc.configs)：%v, sc.configs[len(sc.configs)-1].Num： %v, sc.configs[len(sc.configs)-1].Shards： %v, sc.configs[len(sc.configs)-1].Groups： %v",
+	DPrintf("[节点%d执行Join之后最新配置信息]: len(sc.configs)：%v, sc.configs[len(sc.configs)-1].Num： %v, sc.configs[len(sc.configs)-1].Shards： %v, sc.configs[len(sc.configs)-1].Groups： %v",
 		sc.me, len(sc.configs), sc.configs[len(sc.configs)-1].Num, sc.configs[len(sc.configs)-1].Shards, sc.configs[len(sc.configs)-1].Groups)
-}
-
-// 状态机执行leave命令的时候
-func (sc *ShardCtrler) execLeaveCmd(op *Op) {
-
-	sc.RebalanceShardsForLeave(op.GIDs)
 }
 
 func (sc *ShardCtrler) RebalanceShardsForLeave(removedGIDs []int) {
@@ -152,7 +149,7 @@ func (sc *ShardCtrler) RebalanceShardsForLeave(removedGIDs []int) {
 	for _, gid := range removedGIDs {
 		removedGIDMap[gid] = true
 	}
-	DPrintf(111, "待移除的复制组为：%v", removedGIDMap)
+	DPrintf("待移除的复制组为：%v", removedGIDMap)
 
 	// 合并旧的复制组，但不包括要移除的
 	for gid, servers := range oldConfig.Groups {
@@ -160,7 +157,7 @@ func (sc *ShardCtrler) RebalanceShardsForLeave(removedGIDs []int) {
 			newConfig.Groups[gid] = servers
 		}
 	}
-	DPrintf(111, "此时有效的复制组为: %v,长度为%d", newConfig.Groups, len(newConfig.Groups))
+	DPrintf("此时有效的复制组为: %v,长度为%d", newConfig.Groups, len(newConfig.Groups))
 	// 移除后如果集群中复制组为0，则需要将所有分片的GID指定为0，意味着没有使用复制组
 	// 同时在返回前将新配置加入组中
 	if len(newConfig.Groups) == 0 {
@@ -171,13 +168,10 @@ func (sc *ShardCtrler) RebalanceShardsForLeave(removedGIDs []int) {
 		sc.configs = append(sc.configs, newConfig)
 		return
 	}
+
 	// 计算目标分片数
 	totalShards := len(oldConfig.Shards)
 	totalGroups := len(newConfig.Groups)
-	if totalGroups == 0 {
-		// 不能有零个复制组
-		return
-	}
 	shardsPerGroup := totalShards / totalGroups
 	extraShards := totalShards % totalGroups
 
@@ -215,8 +209,10 @@ func (sc *ShardCtrler) RebalanceShardsForLeave(removedGIDs []int) {
 			shardCounts[gid]--
 		}
 	}
+
 	// 将新配置添加到配置列表
 	sc.configs = append(sc.configs, newConfig)
-	DPrintf(1111, "[节点%d Leave后最新配置信息]: len(sc.configs)：%v, sc.configs[len(sc.configs)-1].Num： %v, sc.configs[len(sc.configs)-1].Shards： %v, sc.configs[len(sc.configs)-1].Groups： %v",
+	DPrintf("[节点%d Leave后最新配置信息]: len(sc.configs)：%v, sc.configs[len(sc.configs)-1].Num： %v, sc.configs[len(sc.configs)-1].Shards： %v, sc.configs[len(sc.configs)-1].Groups： %v",
 		sc.me, len(sc.configs), sc.configs[len(sc.configs)-1].Num, sc.configs[len(sc.configs)-1].Shards, sc.configs[len(sc.configs)-1].Groups)
+
 }

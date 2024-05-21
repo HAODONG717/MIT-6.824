@@ -29,12 +29,13 @@ type Config struct {
 }
 
 const (
-	OK             Err = "OK"
+	OK                 = "OK"
 	ErrWrongLeader Err = "ErrWrongLeader"
 	ErrDuplicate   Err = "ErrDuplicate"
 	ErrKilled      Err = "ErrKilled"
 	ErrTimeout     Err = "ErrTimeout"
 )
+
 const (
 	JoinOp  string = "JoinOp"
 	QueryOp string = "QueryOp"
