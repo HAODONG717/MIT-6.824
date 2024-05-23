@@ -174,10 +174,11 @@ func (kv *ShardKV) applyMsgHandlerLoop() {
 					} else {
 
 						if !kv.ifDuplicate(op.ClientId, op.SeqId) {
-
+							// 记录重复请求
 							kv.SeqMap[op.ClientId] = op.SeqId
 							switch op.OpType {
 							case PutType:
+								// 存储键值对
 								kv.shardsPersist[shardId].KvMap[op.Key] = op.Value
 							case AppendType:
 								kv.shardsPersist[shardId].KvMap[op.Key] += op.Value
@@ -268,17 +269,19 @@ func (kv *ShardKV) ConfigDetectedLoop() {
 				// 将最新配置里不属于自己的分片分给别人
 				if gid == kv.gid && kv.Config.Shards[shardId] != kv.gid && kv.shardsPersist[shardId].ConfigNum < kv.Config.Num {
 
-					sendDate := kv.cloneShard(kv.Config.Num, kv.shardsPersist[shardId].KvMap)
+					sendData := kv.cloneShard(kv.Config.Num, kv.shardsPersist[shardId].KvMap)
 
 					args := SendShardArg{
 						LastAppliedRequestId: SeqMap,
 						ShardId:              shardId,
-						Shard:                sendDate,
+						Shard:                sendData,
 						ClientId:             int64(gid),
 						RequestId:            kv.Config.Num,
 					}
 
 					// shardId -> gid -> server names
+					// kv.Config：要更新的配置   kv.LastConfig：更新前的配置
+					// kv.Config.Shards[shardId]对应的就是最新配置中的不属于自己分片的组id
 					serversList := kv.Config.Groups[kv.Config.Shards[shardId]]
 					servers := make([]*labrpc.ClientEnd, len(serversList))
 					for i, name := range serversList {
@@ -293,6 +296,7 @@ func (kv *ShardKV) ConfigDetectedLoop() {
 						for {
 							var reply AddShardReply
 							// 对自己的共识组内进行add
+							// 代表当前节点向servers[index]发送请求
 							ok := servers[index].Call("ShardKV.AddShard", args, &reply)
 
 							// 如果给予切片成功，或者时间超时，这两种情况都需要进行GC掉不属于自己的切片
@@ -581,6 +585,7 @@ func (kv *ShardKV) allReceived() bool {
 
 func (kv *ShardKV) startCommand(command Op, timeoutPeriod time.Duration) Err {
 	kv.mu.Lock()
+	// 这一步如果成功会往applyCh发送消息，接着startCommand -> applyMsgHandlerLoop
 	index, _, isLeader := kv.rf.Start(command)
 	if !isLeader {
 		kv.mu.Unlock()
@@ -594,6 +599,7 @@ func (kv *ShardKV) startCommand(command Op, timeoutPeriod time.Duration) Err {
 	defer timer.Stop()
 
 	select {
+	// 等待applyMsgHandlerLoop的响应，只有等待applyMsgHandlerLoop的响应会往kv.getWaitCh(index)发送消息
 	case re := <-ch:
 		kv.mu.Lock()
 		delete(kv.waitChMap, index)

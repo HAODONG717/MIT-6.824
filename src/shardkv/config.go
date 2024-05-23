@@ -248,6 +248,8 @@ func (cfg *config) StartServer(gi int, i int) {
 		func(servername string) *labrpc.ClientEnd {
 			name := randstring(20)
 			end := cfg.net.MakeEnd(name)
+			// name随机随机生成的字符串，标识一次端到端RPC连接的标识符或者是一种标记，用于跟踪和管理特定的RPC调用
+			// servername是指目标服务器的名称或地址
 			cfg.net.Connect(name, servername)
 			cfg.net.Enable(name, true)
 			return end

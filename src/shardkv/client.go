@@ -86,14 +86,6 @@ func (ck *Clerk) Get(key string) string {
 				var reply GetReply
 				//fmt.Printf("[ ++++Client[%v]++++] : send a GetType,args:%+v,serverId[%v]\n", ck.clientId, args, si)
 				ok := srv.Call("ShardKV.Get", &args, &reply)
-				if ok {
-					//fmt.Printf("[ ++++Client[%v]++++] : receive a GetType,args:%+v ,replys:%+v ,serverId[%v]\n", ck.clientId, args, reply, si)
-
-				} else {
-					//fmt.Printf("[ ++++Client[%v]++++] : Ask Err:args:%+v\n", ck.clientId, args)
-
-				}
-
 				if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
 					return reply.Value
 				}
